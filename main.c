@@ -10,13 +10,17 @@
 #include <string.h>
 #include <time.h>
 
+#define SCR_WIDTH 650
+#define SCR_HEIGHT 800
+#define GAME_SCR_WIDTH 400
 #define CELL_SIZE 40
 #define SAND_SIZE 4
-#define GRID_W (640 / SAND_SIZE)
-#define GRID_H (960 / SAND_SIZE)
+#define GRID_W (400 / SAND_SIZE)
+#define GRID_H (SCR_HEIGHT / SAND_SIZE)
 #define MAX_VERTS (GRID_W * GRID_H * 6)
 #define MAX_STACK (GRID_W * GRID_H * 4)
 #define BLINK_DURATION 0.4
+#define POINTS_PER_CELL 5
 
 double clear_start_time = -1;
 
@@ -37,33 +41,65 @@ Coord stack[MAX_STACK];
 int stack_index = 0;
 
 bool visited[GRID_H][GRID_W] = {false};
+int visited_count = 0;
+
+enum Color {
+  CYAN,
+  YELLOW,
+  PURPLE,
+  GREEN,
+  RED,
+  BLUE,
+  ORANGE,
+  BEZEL_DARK,
+  BEZEL_LIGHT,
+  HIGHLIGHT,
+  ACCENT,
+  COLOR_COUNT
+};
+float rgb_table[COLOR_COUNT][3] = {
+    [CYAN] = {0.f, 1.f, 1.f},              // cyan
+    [YELLOW] = {1.f, 1.f, 0.f},            // yellow
+    [PURPLE] = {0.6f, 0.f, 0.8f},          // purple
+    [GREEN] = {0.f, 1.f, 0.f},             // green
+    [RED] = {1.f, 0.f, 0.f},               // red
+    [BLUE] = {0.f, 0.f, 1.f},              // blue
+    [ORANGE] = {1.f, 0.5f, 0.f},           // orange
+    [BEZEL_DARK] = {0.08f, 0.09f, 0.14f},  // shadow/outline
+    [BEZEL_LIGHT] = {0.92f, 0.89f, 0.78f}, // main bar
+    [ACCENT] = {1.0f, 0.78f, 0.15f},       // reserved for later (score, labels)
+    [HIGHLIGHT] = {1.0f, 1.0f, 1.0f},
+};
 
 typedef enum {
   PIECE_I,
   PIECE_O,
   PIECE_T,
-  // PIECE_S,
+  PIECE_S,
   // PIECE_Z,
-  // PIECE_J,
+  PIECE_J,
   // PIECE_L,
   PIECE_COUNT
 } PieceType;
-float piece_colors[PIECE_COUNT][3] = {
-    [PIECE_I] = {0.0f, 1.0f, 1.0f}, // cyan
-    [PIECE_O] = {1.0f, 1.0f, 0.0f}, // yellow
-    [PIECE_T] = {0.6f, 0.0f, 0.8f}, // purple
-                                    // [PIECE_S] = {0.0f, 1.0f, 0.0f}, // green
-                                    // [PIECE_Z] = {1.0f, 0.0f, 0.0f}, // red
-                                    // [PIECE_J] = {0.0f, 0.0f, 1.0f}, // blue
-                                    // [PIECE_L] = {1.0f, 0.5f, 0.0f}, // orange
+
+enum Color piece_to_color[PIECE_COUNT] = {
+    [PIECE_I] = CYAN,
+    [PIECE_O] = YELLOW,
+    [PIECE_T] = PURPLE,
+    [PIECE_S] = GREEN,
+    // [PIECE_Z] = RED,
+    [PIECE_J] = BLUE,
+    // [PIECE_L] = ORANGE,
 };
+
 int piece_shape[PIECE_COUNT][3][2] = {
     [PIECE_I] = {{1, 0}, {1, 0}, {1, 0}},
     [PIECE_O] = {{1, 1}, {1, 1}, {0, 0}},
     [PIECE_T] = {{1, 0}, {1, 1}, {1, 0}},
-    // [PIECE_S] = {{1, 0}, {1, 1}, {0, 1}},
-    // [PIECE_Z] = {{0, 1}, {1, 1}, {1, 0}}, [PIECE_J] = {{0, 1}, {0, 1}, {1,
-    // 1}}, [PIECE_L] = {{1, 0}, {1, 0}, {1, 1}},
+    [PIECE_S] = {{1, 0}, {1, 1}, {0, 1}},
+    // [PIECE_Z] = {{0, 1}, {1, 1}, {1, 0}},
+    [PIECE_J] = {{0, 1}, {0, 1}, {1, 1}},
+    // [PIECE_L] = {{1, 0}, {1, 0}, {1, 1}},
 };
 int dir[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 
@@ -74,9 +110,14 @@ typedef struct Piece {
 } Piece;
 
 typedef struct State {
-  int width;
-  int height;
+  int scr_width;
+  int scr_height;
+  int fb_width;
+  int fb_height;
+  int score;
+  bool is_game_over;
   Piece current_piece;
+  Piece next_piece;
 } State;
 
 typedef struct VertexRenderer {
@@ -153,10 +194,12 @@ static const char *vertex_shader_source =
     "layout (location = 2) in vec4 vertex;\n"
 
     "out vec3 color;\n"
+    "uniform mat4 projection;\n"
 
     "void main()\n"
     "{\n"
-    "   gl_Position = vec4(aPos.x, aPos.y, 0.0, 1.0);\n" // 2d not 3d
+    "   gl_Position = projection * vec4(aPos.x, aPos.y, 0.0, 1.0);\n" // 2d not
+                                                                      // 3d
     "   color = aCol;\n"
     "}\n";
 
@@ -195,8 +238,12 @@ void key_callback(GLFWwindow *window, int key, int scancode, int action,
 
   if (key == GLFW_KEY_RIGHT &&
       (action == GLFW_PRESS || action == GLFW_REPEAT)) {
-    if (state->current_piece.x + 10 >= state->width - CELL_SIZE * 2) {
-      state->current_piece.x = state->width - CELL_SIZE * 2;
+    if (state->current_piece.piece_type == PIECE_I &&
+        state->current_piece.x + 10 >= GAME_SCR_WIDTH - CELL_SIZE) {
+      state->current_piece.x = GAME_SCR_WIDTH - CELL_SIZE;
+    } else if (state->current_piece.piece_type != PIECE_I &&
+               state->current_piece.x + 10 >= GAME_SCR_WIDTH - CELL_SIZE * 2) {
+      state->current_piece.x = GAME_SCR_WIDTH - CELL_SIZE * 2;
     } else {
       state->current_piece.x += 10;
     }
@@ -218,25 +265,14 @@ Mat4Row *ortho(int left, int right, int bottom, int top) {
 }
 
 void push_quad(float width, float height, float x, float y, GLFWwindow *window,
-               float piece_color[3]) {
-  State *state = glfwGetWindowUserPointer(window);
-
-  float x2 = x + width;
-  float y2 = y + height;
-
-  float ndc_x = (x / state->width) * 2.0 - 1.0;
-  float ndc_y = 1.0 - (y / state->height) * 2.0;
-
-  float ndc_x2 = (x2 / state->width) * 2.0 - 1.0;
-  float ndc_y2 = 1.0 - (y2 / state->height) * 2.0;
-
+               float rgb_color[3]) {
   Vertex vertices[] = {
-      {{ndc_x, ndc_y}, {piece_color[0], piece_color[1], piece_color[2]}},
-      {{ndc_x2, ndc_y}, {piece_color[0], piece_color[1], piece_color[2]}},
-      {{ndc_x, ndc_y2}, {piece_color[0], piece_color[1], piece_color[2]}},
-      {{ndc_x2, ndc_y}, {piece_color[0], piece_color[1], piece_color[2]}},
-      {{ndc_x2, ndc_y2}, {piece_color[0], piece_color[1], piece_color[2]}},
-      {{ndc_x, ndc_y2}, {piece_color[0], piece_color[1], piece_color[2]}}};
+      {{x, y}, {rgb_color[0], rgb_color[1], rgb_color[2]}},
+      {{x + width, y}, {rgb_color[0], rgb_color[1], rgb_color[2]}},
+      {{x, y + height}, {rgb_color[0], rgb_color[1], rgb_color[2]}},
+      {{x + width, y}, {rgb_color[0], rgb_color[1], rgb_color[2]}},
+      {{x + width, y + height}, {rgb_color[0], rgb_color[1], rgb_color[2]}},
+      {{x, y + height}, {rgb_color[0], rgb_color[1], rgb_color[2]}}};
 
   memcpy(&batch[batch_index], vertices, sizeof(vertices));
   batch_index += 6;
@@ -253,7 +289,8 @@ void window_init(Renderer *renderer, State *state) {
   glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
   glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 
-  GLFWwindow *window = glfwCreateWindow(640, 960, "Cage", NULL, NULL);
+  GLFWwindow *window =
+      glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "Cage", NULL, NULL);
   if (!window) {
     glfwTerminate();
     exit(EXIT_FAILURE);
@@ -269,16 +306,18 @@ void window_init(Renderer *renderer, State *state) {
   // framebuffer size is for the viewport (actual pixels, 2x on retina)
   int fb_width, fb_height;
   glfwGetFramebufferSize(window, &fb_width, &fb_height);
-  glViewport(0, 0, fb_width, fb_height);
 
-  // window size is the logical size (640x960) used for all game logic
+  // window size is the logical size (SCR_WIDTH x SCR_HEIGHT) used for all
+  // game logic
   int width, height;
   glfwGetWindowSize(window, &width, &height);
 
   glfwSetWindowUserPointer(window, state);
 
-  state->height = height;
-  state->width = width;
+  state->fb_height = fb_height;
+  state->fb_width = fb_width;
+  state->scr_height = height;
+  state->scr_width = width;
 
   renderer->window = window;
 }
@@ -317,6 +356,7 @@ void vertex_renderer_init(Renderer *renderer, State *state) {
   glLinkProgram(shader_program);
   renderer->vertex_renderer.shader_program = shader_program;
 
+  glUseProgram(shader_program);
   glDeleteShader(vertex_shader);
   glDeleteShader(fragment_shader);
 
@@ -337,7 +377,7 @@ void text_renderer_init(Renderer *renderer, State *state) {
   }
 
   FT_Face face;
-  if (FT_New_Face(ft, "./arial.ttf", 0, &face)) {
+  if (FT_New_Face(ft, "./PressStart2P-Regular.ttf", 0, &face)) {
     printf("failed to load font\n");
     return;
   }
@@ -409,12 +449,6 @@ void text_renderer_init(Renderer *renderer, State *state) {
 
   glUseProgram(shader_program);
 
-  GLint loc = glGetUniformLocation(shader_program, "projection");
-  Mat4Row *projection = ortho(0, state->width, 0, state->height);
-  glUniformMatrix4fv(loc, 1, GL_FALSE, (float *)projection);
-
-  free(projection);
-
   glDeleteShader(vertex_shader);
   glDeleteShader(fragment_shader);
 
@@ -440,8 +474,9 @@ void crumble(Piece *piece) {
             if (gx >= 0 && gx < GRID_W && gy >= 0 && gy < GRID_H) {
               cells[gy][gx].cell_type = SAND;
               cells[gy][gx].piece_type = piece->piece_type;
-              memcpy(&cells[gy][gx].color, &piece_colors[piece->piece_type],
-                     sizeof(piece_colors[0]));
+              memcpy(&cells[gy][gx].color,
+                     &rgb_table[piece_to_color[piece->piece_type]],
+                     sizeof(rgb_table[0]));
             }
           }
         }
@@ -465,26 +500,42 @@ bool collide(Piece *piece, State *state) {
   return false;
 }
 
-void spawn_piece(Renderer *renderer, GLFWwindow *window) {
-  State *state = glfwGetWindowUserPointer(window);
+void draw_piece(Renderer *renderer, Piece *piece) {
   for (int row = 0; row < 3; row++) {
     for (int col = 0; col < 2; col++) {
-      if (piece_shape[state->current_piece.piece_type][row][col] == 1) {
-        push_quad(CELL_SIZE, CELL_SIZE,
-                  state->current_piece.x + col * CELL_SIZE,
-                  state->current_piece.y + row * CELL_SIZE, window,
-                  piece_colors[state->current_piece.piece_type]);
+      if (piece_shape[piece->piece_type][row][col] == 1) {
+        push_quad(CELL_SIZE, CELL_SIZE, piece->x + col * CELL_SIZE,
+                  piece->y + row * CELL_SIZE, renderer->window,
+                  rgb_table[piece_to_color[piece->piece_type]]);
       }
     }
   }
+}
+
+float get_center_x(float pos1, float pos2, float width) {
+  float center = pos1 + ((pos2 - pos1) / 2);
+  return center - width / 2;
+}
+
+void spawn_piece(Renderer *renderer) {
+  State *state = glfwGetWindowUserPointer(renderer->window);
+  draw_piece(renderer, &state->current_piece);
   if (collide(&state->current_piece, state)) {
     crumble(&state->current_piece);
-    state->current_piece.x = rand() % (state->width - CELL_SIZE * 2);
+    state->current_piece.piece_type = state->next_piece.piece_type;
+    state->current_piece.x = rand() % (GAME_SCR_WIDTH - CELL_SIZE * 2);
     state->current_piece.y = 0;
-    state->current_piece.piece_type = rand() % PIECE_COUNT;
+    if (collide(&state->current_piece, state)) {
+      state->is_game_over = true;
+      return;
+    }
+
+    state->next_piece.piece_type = rand() % PIECE_COUNT;
+    state->next_piece.x = get_center_x(
+        425, 625, state->next_piece.piece_type == PIECE_I ? 40 : 80);
+    state->next_piece.y = 325;
   }
-  double now = glfwGetTime();
-  if (state->current_piece.y + 3 * CELL_SIZE < state->height) {
+  if (state->current_piece.y + 3 * CELL_SIZE < state->scr_height) {
     state->current_piece.y += 1;
   }
 }
@@ -534,6 +585,7 @@ bool flood_fill(int row, int col, int piece_type) {
   stack[stack_index++] = (Coord){row, col};
 
   visited[row][col] = true;
+  visited_count += 1;
 
   while (stack_index > 0) {
     Coord c = stack[--stack_index];
@@ -553,6 +605,7 @@ bool flood_fill(int row, int col, int piece_type) {
         continue;
 
       visited[nx][ny] = true;
+      visited_count += 1;
 
       if (ny == GRID_W - 1)
         reached_right = true;
@@ -564,7 +617,41 @@ bool flood_fill(int row, int col, int piece_type) {
   return reached_right;
 }
 
-void clear_line() {
+int get_digit_count(int score) {
+  if (score == 0)
+    return 1;
+  int count = 0;
+  while (score > 0) {
+    score /= 10;
+    count++;
+  }
+  return count;
+}
+
+char *int_to_string(int score) {
+  int n = get_digit_count(score);
+  char *result = malloc((n + 1) * sizeof(char));
+
+  int i = n - 1;
+  if (!score) {
+    result[i] = (score % 10) + '0';
+  } else {
+    while (score) {
+      result[i] = (score % 10) + '0';
+      score /= 10;
+      i--;
+    }
+  }
+  result[n] = '\0';
+  return result;
+}
+
+void calculate_score(Renderer *renderer) {
+  State *state = glfwGetWindowUserPointer(renderer->window);
+  state->score += visited_count * POINTS_PER_CELL;
+}
+
+void clear_line(Renderer *renderer) {
   int left_row[PIECE_COUNT];
   for (int p = 0; p < PIECE_COUNT; p++)
     left_row[p] = -1;
@@ -583,7 +670,9 @@ void clear_line() {
   for (int p = 0; p < PIECE_COUNT; p++) {
     if (left_row[p] != -1 && right_has[p]) {
       memset(visited, false, sizeof(visited));
+      visited_count = 0;
       if (flood_fill(left_row[p], 0, p)) {
+        calculate_score(renderer);
         clear_start_time = glfwGetTime();
         for (int row = 0; row < GRID_H; row++) {
           for (int col = 0; col < GRID_W; col++) {
@@ -597,25 +686,58 @@ void clear_line() {
   }
 }
 
-void flush_batch(Renderer *renderer) {
+void flush_batch_game(Renderer *renderer) {
+  State *state = glfwGetWindowUserPointer(renderer->window);
+  glViewport(0, 0, (float)state->fb_width / state->scr_width * 400,
+             state->fb_height);
   glBindVertexArray(renderer->vertex_renderer.vao);
   glBindBuffer(GL_ARRAY_BUFFER, renderer->vertex_renderer.vbo);
   glBufferSubData(GL_ARRAY_BUFFER, 0, batch_index * sizeof(Vertex), batch);
   glUseProgram(renderer->vertex_renderer.shader_program);
+  GLint loc = glGetUniformLocation(renderer->vertex_renderer.shader_program,
+                                   "projection");
+  Mat4Row *projection = ortho(0, GAME_SCR_WIDTH, state->scr_height, 0);
+  glUniformMatrix4fv(loc, 1, GL_FALSE, (float *)projection);
+  free(projection);
   glDrawArrays(GL_TRIANGLES, 0, batch_index);
 }
 
-void render_text(Renderer *renderer, char *text, float x, float y,
-                 float scale) {
+void flush_batch_ui(Renderer *renderer) {
+  State *state = glfwGetWindowUserPointer(renderer->window);
+  glViewport((float)state->fb_width / state->scr_width * 400, 0,
+             (float)state->fb_width / state->scr_width * 250, state->fb_height);
+  glBindVertexArray(renderer->vertex_renderer.vao);
+  glBindBuffer(GL_ARRAY_BUFFER, renderer->vertex_renderer.vbo);
+  glBufferSubData(GL_ARRAY_BUFFER, 0, batch_index * sizeof(Vertex), batch);
+  glUseProgram(renderer->vertex_renderer.shader_program);
+  GLint loc = glGetUniformLocation(renderer->vertex_renderer.shader_program,
+                                   "projection");
+  Mat4Row *projection = ortho(400, 650, state->scr_height, 0);
+  glUniformMatrix4fv(loc, 1, GL_FALSE, (float *)projection);
+  free(projection);
+  glDrawArrays(GL_TRIANGLES, 0, batch_index);
+}
+
+void render_text(Renderer *renderer, char *text, float x, float y, float scale,
+                 enum Color color) {
+  State *state = glfwGetWindowUserPointer(renderer->window);
+  y = state->scr_height - y;
+  glViewport((float)state->fb_width / state->scr_width * 400, 0,
+             (float)state->fb_width / state->scr_width * 250, state->fb_height);
   glUseProgram(renderer->text_renderer.shader_program);
+  GLint loc = glGetUniformLocation(renderer->text_renderer.shader_program,
+                                   "projection");
+  Mat4Row *projection = ortho(400, 650, 0, state->scr_height);
+  glUniformMatrix4fv(loc, 1, GL_FALSE, (float *)projection);
+  free(projection);
+
   glUniform3f(glGetUniformLocation(renderer->text_renderer.shader_program,
                                    "text_color"),
-              0.5f, 0.8f, 0.2f);
+              rgb_table[color][0], rgb_table[color][1], rgb_table[color][2]);
   glActiveTexture(GL_TEXTURE0);
   glBindVertexArray(renderer->text_renderer.vao);
 
   for (int i = 0; text[i] != '\0'; i++) {
-    unsigned char c = text[i];
     Character ch = characters[text[i]];
 
     float xpos = x + ch.bearing[0] * scale;
@@ -623,14 +745,6 @@ void render_text(Renderer *renderer, char *text, float x, float y,
 
     float w = ch.size[0] * scale;
     float h = ch.size[1] * scale;
-
-    if (i == 0) {
-      fprintf(stderr,
-              "DEBUG char='%c' tex_id=%u size=(%d,%d) bearing=(%d,%d) "
-              "advance=%u xpos=%f ypos=%f w=%f h=%f\n",
-              text[i], ch.texture_id, ch.size[0], ch.size[1], ch.bearing[0],
-              ch.bearing[1], ch.advance, xpos, ypos, w, h);
-    }
 
     TextVertex vertices[6] = {
         {{xpos, ypos + h}, 0.0f, 0.0f},     {{xpos, ypos}, 0.0f, 1.0f},
@@ -654,28 +768,77 @@ void render_text(Renderer *renderer, char *text, float x, float y,
   glBindTexture(GL_TEXTURE_2D, 0);
 }
 
+void draw_next_piece(Renderer *renderer) {
+  State *state = glfwGetWindowUserPointer(renderer->window);
+  draw_piece(renderer, &state->next_piece);
+}
+
+void draw_divider(Renderer *renderer) {
+  State *state = glfwGetWindowUserPointer(renderer->window);
+  push_quad(12.0, state->scr_height, 400, 0, renderer->window,
+            rgb_table[BEZEL_DARK]);
+  push_quad(8.0, state->scr_height, 400, 0, renderer->window,
+            rgb_table[BEZEL_LIGHT]);
+  push_quad(2.0, state->scr_height, 400, 0, renderer->window,
+            rgb_table[HIGHLIGHT]);
+}
+
+void draw_box(Renderer *renderer, float x1, float y1, float x2, float y2) {
+  float w = x2 - x1;
+  float h = y2 - y1;
+  push_quad(w, 3, x1, y1, renderer->window, rgb_table[BEZEL_DARK]); // top
+  push_quad(3, h, x1, y1, renderer->window, rgb_table[BEZEL_DARK]); // left
+  push_quad(w, 3, x1, y2, renderer->window, rgb_table[BEZEL_DARK]); // bottom
+  push_quad(3, h + 2, x2, y1, renderer->window, rgb_table[BEZEL_DARK]); // right
+}
+
+void draw_score_box(Renderer *renderer) {
+  draw_box(renderer, 425, 50, 625, 150);
+}
+
+void draw_next_piece_box(Renderer *renderer) {
+  draw_box(renderer, 425, 225, 625, 475);
+}
+
+float get_string_width(char *string, float scale) {
+  float width = 0;
+  for (int i = 0; string[i] != '\0'; i++) {
+    Character c = characters[string[i]];
+    width += (c.advance >> 6) * scale;
+  }
+
+  return width;
+}
+
 int main() {
   srand(time(NULL));
   State state = {0};
   Renderer renderer = {0};
 
   window_init(&renderer, &state);
-
   vertex_renderer_init(&renderer, &state);
   text_renderer_init(&renderer, &state);
 
-  state.current_piece.x = rand() % (state.width - CELL_SIZE * 2);
+  state.current_piece.x = rand() % (GAME_SCR_WIDTH - CELL_SIZE * 2);
   state.current_piece.piece_type = rand() % PIECE_COUNT;
 
+  state.next_piece.piece_type = rand() % PIECE_COUNT;
+  state.next_piece.x =
+      get_center_x(425, 625, state.next_piece.piece_type == PIECE_I ? 40 : 80);
+  state.next_piece.y = 325;
+
   while (!glfwWindowShouldClose(renderer.window)) {
+    if (state.is_game_over)
+      break;
+
     glClear(GL_COLOR_BUFFER_BIT);
     batch_index = 0;
 
-    spawn_piece(&renderer, renderer.window);
+    spawn_piece(&renderer);
 
     update_sand();
 
-    clear_line();
+    clear_line(&renderer);
     if (clear_start_time >= 0 &&
         glfwGetTime() - clear_start_time > BLINK_DURATION) {
       for (int row = 0; row < GRID_H; row++) {
@@ -689,9 +852,33 @@ int main() {
       clear_start_time = -1;
     }
     draw_grid(&renderer, renderer.window);
-    flush_batch(&renderer);
 
-    render_text(&renderer, "hello", 0, 0, 4);
+    flush_batch_game(&renderer);
+    batch_index = 0;
+
+    draw_divider(&renderer);
+    draw_score_box(&renderer);
+    draw_next_piece_box(&renderer);
+    draw_next_piece(&renderer);
+
+    flush_batch_ui(&renderer);
+
+    render_text(&renderer, "SCORE",
+                get_center_x(425, 625, get_string_width("SCORE", 0.5)), 90, 0.5,
+                GREEN);
+
+    char *score_str = int_to_string(state.score);
+    render_text(&renderer, score_str,
+                get_center_x(425, 625, get_string_width(score_str, 0.5)), 120,
+                0.5, HIGHLIGHT);
+    free(score_str);
+
+    render_text(&renderer, "NEXT",
+                get_center_x(425, 625, get_string_width("NEXT", 0.5)), 270, 0.5,
+                GREEN);
+    render_text(&renderer, "PIECE",
+                get_center_x(425, 625, get_string_width("PIECE", 0.5)), 300,
+                0.5, GREEN);
 
     glfwSwapBuffers(renderer.window);
     glfwPollEvents();
