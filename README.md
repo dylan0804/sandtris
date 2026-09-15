@@ -2,7 +2,7 @@
 
 A falling-sand puzzle game inspired by Tetris. Pieces fall, crumble into individual grains of sand, and settle realistically instead of locking into rigid rows. Clear the board by connecting a single color's sand from the left wall to the right wall.
 
-![gameplay screenshot]
+https://github.com/user-attachments/assets/797edf6a-4960-42e1-a6ce-9f42a0d4e510
 
 ## Controls
 
